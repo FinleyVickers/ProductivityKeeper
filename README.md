@@ -60,6 +60,32 @@ The technique works as follows:
 4. Take a short break (5 minutes)
 5. After four pomodoros, take a longer break (15-30 minutes)
 
+## Project Structure
+
+- `popup.html`: The main extension popup interface
+- `popup.js`: Main application logic using Vue.js
+- `background.js`: Background service worker for timer management
+- `styles.css`: Main stylesheet for the extension
+- `manifest.json`: Chrome extension manifest file
+- `lib/`: Directory containing third-party libraries
+  - `lib/vue/`: Vue.js framework files with its own LICENSE
+- `images/`: Icons and images used in the extension
+- `sounds/`: Notification sounds
+
+## Third-Party Libraries
+
+This project uses the following third-party libraries:
+
+- **Vue.js**: A progressive JavaScript framework for building user interfaces
+  - Located in: `lib/vue/`
+  - License: MIT
+  - Website: [vuejs.org](https://vuejs.org/)
+
+- **Animate.css**: A library of ready-to-use CSS animations
+  - Located in: `lib/animate-css/`
+  - License: MIT
+  - Website: [animate.style](https://animate.style/)
+
 ## License
 
-MIT License 
+MIT License - See the LICENSE file for details. 
