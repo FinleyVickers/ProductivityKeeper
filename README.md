@@ -14,6 +14,11 @@ A Chrome extension featuring a Pomodoro timer to help you stay productive with a
 - **Clean, Modern UI**: Beautiful interface with gradients and animations
 - **Pomodoro Counter**: Visual indicator of completed pomodoros
 
+## Screenshots
+<img width="349" alt="Screenshot 2025-03-02 at 8 38 44 PM" src="https://github.com/user-attachments/assets/67a4625d-5be0-4dbb-8486-f2d506858e72" />
+<img width="348" alt="Screenshot 2025-03-02 at 8 10 43 PM" src="https://github.com/user-attachments/assets/61532aca-2f16-455d-8452-591650a59268" />
+<img width="349" alt="Screenshot 2025-03-02 at 8 39 02 PM" src="https://github.com/user-attachments/assets/36ee776f-7a42-4a4e-a6ac-59220905ae62" />
+
 ## Known Issues
 
 > **⚠️ Disclaimer:** The alarm sound feature is currently not working. Visual notifications will still appear when a timer completes, but audio notifications are not yet implemented. This feature will be added in a future update.
