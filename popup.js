@@ -1,6 +1,19 @@
 // Create Vue app
 const { createApp, h } = Vue;
 
+// Add event listener for when the popup is about to close
+window.addEventListener('beforeunload', () => {
+  // Force a sync with the background to ensure timer state is saved
+  chrome.runtime.sendMessage({ action: 'getTimerState' });
+});
+
+// Add event listener for when the popup is loaded
+document.addEventListener('DOMContentLoaded', () => {
+  console.log('Popup DOM loaded, ensuring timer state is loaded');
+  // Force a sync with the background to ensure timer state is loaded
+  chrome.runtime.sendMessage({ action: 'getTimerState' });
+});
+
 const app = createApp({
   data() {
     return {
@@ -24,7 +37,10 @@ const app = createApp({
         darkMode: false
       },
       progressOffset: 0,
-      syncInterval: null
+      syncInterval: null,
+      isResettingOrSwitching: false,
+      lastSyncTime: Date.now(),
+      lastBackgroundSync: Date.now()
     };
   },
   
@@ -45,6 +61,8 @@ const app = createApp({
       if (this.isRunning) return;
       
       this.isRunning = true;
+      this.lastSyncTime = Date.now();
+      this.lastBackgroundSync = Date.now();
       
       // Send message to background script
       chrome.runtime.sendMessage({
@@ -55,6 +73,13 @@ const app = createApp({
         totalSeconds: this.totalSeconds,
         remainingSeconds: this.remainingSeconds,
         completedPomodoros: this.completedPomodoros
+      }, (response) => {
+        // Ensure we got a response from the background script
+        if (response && response.success) {
+          console.log('Timer started in background');
+        } else {
+          console.error('Failed to start timer in background');
+        }
       });
       
       // Start local interval for UI updates
@@ -66,18 +91,45 @@ const app = createApp({
       if (!this.isRunning) return;
       
       this.isRunning = false;
-      clearInterval(this.interval);
+      
+      // Clear local interval
+      if (this.syncInterval) {
+        clearInterval(this.syncInterval);
+        this.syncInterval = null;
+      }
       
       // Send message to background script
       chrome.runtime.sendMessage({
         action: 'stopTimer'
+      }, (response) => {
+        // Ensure we got a response from the background script
+        if (response && response.success) {
+          console.log('Timer stopped in background');
+        } else {
+          console.error('Failed to stop timer in background');
+        }
       });
     },
     
     // Reset timer
     resetTimer() {
-      this.pauseTimer();
+      console.log('Resetting timer');
       
+      // Set the flag to prevent sync during reset
+      this.isResettingOrSwitching = true;
+      
+      // First, pause the timer and clear any sync intervals
+      this.pauseTimer();
+      if (this.syncInterval) {
+        clearInterval(this.syncInterval);
+        this.syncInterval = null;
+      }
+      
+      // Reset sync times
+      this.lastSyncTime = Date.now();
+      this.lastBackgroundSync = Date.now();
+      
+      // Set the appropriate duration based on the current mode
       switch (this.currentMode) {
         case 'pomodoro':
           this.minutes = this.settings.pomodoroDuration;
@@ -96,6 +148,25 @@ const app = createApp({
       this.seconds = 0;
       this.remainingSeconds = this.totalSeconds;
       this.updateProgressRing();
+      
+      // Send message to background script to reset timer state
+      chrome.runtime.sendMessage({
+        action: 'resetTimer',
+        minutes: this.minutes,
+        seconds: this.seconds,
+        mode: this.currentMode,
+        totalSeconds: this.totalSeconds,
+        remainingSeconds: this.totalSeconds,
+        completedPomodoros: this.completedPomodoros
+      }, (response) => {
+        // After the background has been updated, restart the sync interval
+        // with a slight delay to ensure the background state is updated first
+        setTimeout(() => {
+          console.log('Timer reset complete, restarting sync');
+          this.isResettingOrSwitching = false;
+          this.startSyncInterval();
+        }, 300);
+      });
     },
     
     // Update progress ring
@@ -117,6 +188,22 @@ const app = createApp({
     
     // Switch timer mode
     switchMode(mode) {
+      console.log(`Switching mode to ${mode}`);
+      
+      // Set the flag to prevent sync during mode switch
+      this.isResettingOrSwitching = true;
+      
+      // First, pause any running timer and clear sync intervals
+      this.pauseTimer();
+      if (this.syncInterval) {
+        clearInterval(this.syncInterval);
+        this.syncInterval = null;
+      }
+      
+      // Reset sync times
+      this.lastSyncTime = Date.now();
+      this.lastBackgroundSync = Date.now();
+      
       this.currentMode = mode;
       
       switch (mode) {
@@ -136,8 +223,26 @@ const app = createApp({
       
       this.seconds = 0;
       this.remainingSeconds = this.totalSeconds;
-      this.pauseTimer();
       this.updateProgressRing();
+      
+      // Send message to background script to update timer mode
+      chrome.runtime.sendMessage({
+        action: 'switchMode',
+        minutes: this.minutes,
+        seconds: this.seconds,
+        mode: this.currentMode,
+        totalSeconds: this.totalSeconds,
+        remainingSeconds: this.totalSeconds,
+        completedPomodoros: this.completedPomodoros
+      }, (response) => {
+        // After the background has been updated, restart the sync interval
+        // with a slight delay to ensure the background state is updated first
+        setTimeout(() => {
+          console.log('Mode switch complete, restarting sync');
+          this.isResettingOrSwitching = false;
+          this.startSyncInterval();
+        }, 300);
+      });
     },
     
     // Toggle settings panel
@@ -169,9 +274,12 @@ const app = createApp({
     loadSettings() {
       chrome.storage.sync.get('productivityKeeperSettings', (data) => {
         if (data.productivityKeeperSettings) {
+          console.log('Loading settings from storage');
           this.settings = data.productivityKeeperSettings;
           this.applyThemeColor();
-          this.resetTimer();
+          
+          // Don't reset the timer here, as we'll sync with background state later
+          // This prevents the timer from resetting when the popup is opened
         }
       });
     },
@@ -196,10 +304,216 @@ const app = createApp({
     
     // Sync with background state
     syncWithBackgroundState() {
+      // Add a flag to track if we're currently in the middle of a reset or mode switch
+      if (this.isResettingOrSwitching) {
+        return;
+      }
+      
       chrome.runtime.sendMessage({ action: 'getTimerState' }, (response) => {
         if (response && response.timerState) {
           const timerState = response.timerState;
           
+          // Only update if there's a significant difference or state change
+          // This prevents visual stuttering during normal countdown
+          const significantChange = 
+            this.isRunning !== timerState.isRunning || 
+            this.currentMode !== timerState.mode ||
+            this.completedPomodoros !== timerState.completedPomodoros ||
+            Math.abs(this.remainingSeconds - timerState.remainingSeconds) > 2;
+          
+          if (significantChange) {
+            console.log('Significant change detected, updating UI from background');
+            // Update local state from background
+            this.minutes = timerState.minutes;
+            this.seconds = timerState.seconds;
+            this.isRunning = timerState.isRunning;
+            this.currentMode = timerState.mode;
+            this.totalSeconds = timerState.totalSeconds;
+            this.remainingSeconds = timerState.remainingSeconds;
+            this.completedPomodoros = timerState.completedPomodoros;
+            
+            // Reset sync times to prevent jumps
+            this.lastSyncTime = Date.now();
+            this.lastBackgroundSync = Date.now();
+            
+            this.updateProgressRing();
+          } else if (this.isRunning) {
+            // For running timers, implement a smoother local countdown
+            // instead of constantly syncing with the background
+            this.updateLocalCountdown();
+          }
+          
+          // If timer is running, ensure we have a local sync interval
+          if (timerState.isRunning && !this.syncInterval) {
+            console.log('Timer is running but no sync interval, starting sync interval');
+            this.startSyncInterval();
+          } else if (!timerState.isRunning && this.syncInterval) {
+            // If timer is not running but we have an interval, clear it
+            console.log('Timer is not running but sync interval exists, clearing interval');
+            clearInterval(this.syncInterval);
+            this.syncInterval = null;
+          }
+        } else {
+          console.error('Failed to get timer state from background in syncWithBackgroundState');
+        }
+      });
+    },
+    
+    // Update the local countdown for smoother visual updates
+    updateLocalCountdown() {
+      // Calculate the current time based on the last sync
+      const now = Date.now();
+      const elapsedSinceLastSync = (now - this.lastSyncTime) / 1000;
+      
+      // For smoother updates, we'll update the progress ring on every call
+      // but only update the displayed time when a full second has passed
+      
+      // Calculate the precise remaining seconds (including fractional part)
+      const preciseRemainingSeconds = this.remainingSeconds - elapsedSinceLastSync;
+      
+      // Don't let it go below zero
+      if (preciseRemainingSeconds <= 0) {
+        // If we've reached zero locally, sync with background to get the next state
+        this.syncWithBackgroundState();
+        return;
+      }
+      
+      // Update the progress ring with the precise value for smooth animation
+      const progress = 1 - (preciseRemainingSeconds / this.totalSeconds);
+      this.progressOffset = this.progressRingCircumference - (progress * this.progressRingCircumference);
+      
+      // Only update the displayed time when a full second has passed
+      if (elapsedSinceLastSync >= 1) {
+        // Update the last sync time
+        this.lastSyncTime = now;
+        
+        // Decrement the remaining seconds
+        this.remainingSeconds = Math.max(0, this.remainingSeconds - Math.floor(elapsedSinceLastSync));
+        
+        // Calculate minutes and seconds
+        this.minutes = Math.floor(this.remainingSeconds / 60);
+        this.seconds = this.remainingSeconds % 60;
+      }
+    },
+    
+    // Start sync interval for UI updates
+    startSyncInterval() {
+      // Don't start a new interval if we're in the middle of resetting or switching modes
+      if (this.isResettingOrSwitching) {
+        return;
+      }
+      
+      // Clear any existing interval
+      if (this.syncInterval) {
+        clearInterval(this.syncInterval);
+        this.syncInterval = null;
+      }
+      
+      // Initialize the last sync time and background sync time
+      this.lastSyncTime = Date.now();
+      this.lastBackgroundSync = Date.now();
+      
+      console.log('Starting sync interval for UI updates');
+      
+      // Start new interval for smooth local updates (runs more frequently)
+      this.syncInterval = setInterval(() => {
+        // Only update if we're not in the middle of resetting or switching modes
+        if (!this.isResettingOrSwitching) {
+          if (this.isRunning) {
+            // Update the local countdown for smooth visual updates
+            this.updateLocalCountdown();
+            
+            // Sync with background less frequently (every 2 seconds)
+            // to avoid visual stuttering but still stay in sync
+            const now = Date.now();
+            if (now - this.lastBackgroundSync >= 2000) {
+              this.lastBackgroundSync = now;
+              
+              // Get the timer state from the background
+              chrome.runtime.sendMessage({ action: 'getTimerState' }, (response) => {
+                if (response && response.timerState) {
+                  const timerState = response.timerState;
+                  
+                  // Check if the background timer is still running
+                  if (!timerState.isRunning && this.isRunning) {
+                    console.log('Background timer stopped but UI thinks it\'s running, updating UI');
+                    // Background timer stopped but UI thinks it's running
+                    // Update UI to match background
+                    this.isRunning = false;
+                    if (this.syncInterval) {
+                      clearInterval(this.syncInterval);
+                      this.syncInterval = null;
+                    }
+                    
+                    // Update all timer values from background
+                    this.minutes = timerState.minutes;
+                    this.seconds = timerState.seconds;
+                    this.remainingSeconds = timerState.remainingSeconds;
+                    this.updateProgressRing();
+                  } else if (timerState.isRunning && !this.isRunning) {
+                    console.log('Background timer running but UI thinks it\'s stopped, updating UI');
+                    // Background timer running but UI thinks it's stopped
+                    // Update UI to match background
+                    this.isRunning = true;
+                    
+                    // Update all timer values from background
+                    this.minutes = timerState.minutes;
+                    this.seconds = timerState.seconds;
+                    this.remainingSeconds = timerState.remainingSeconds;
+                    this.updateProgressRing();
+                  } else if (timerState.isRunning && this.isRunning) {
+                    // Both running, check if we need to sync values
+                    const timeDiff = Math.abs(this.remainingSeconds - timerState.remainingSeconds);
+                    if (timeDiff > 2) {
+                      console.log(`Syncing with background, time difference: ${timeDiff}s`);
+                      // If difference is more than 2 seconds, sync with background
+                      this.minutes = timerState.minutes;
+                      this.seconds = timerState.seconds;
+                      this.remainingSeconds = timerState.remainingSeconds;
+                      this.lastSyncTime = Date.now();
+                      this.updateProgressRing();
+                    }
+                  }
+                  
+                  // Always update completed pomodoros and mode from background
+                  if (this.completedPomodoros !== timerState.completedPomodoros) {
+                    this.completedPomodoros = timerState.completedPomodoros;
+                  }
+                  
+                  if (this.currentMode !== timerState.mode) {
+                    this.currentMode = timerState.mode;
+                  }
+                }
+              });
+            }
+          } else {
+            // If not running, just sync with background once every 2 seconds
+            // instead of on every interval to reduce unnecessary calls
+            const now = Date.now();
+            if (now - this.lastBackgroundSync >= 2000) {
+              this.lastBackgroundSync = now;
+              this.syncWithBackgroundState();
+            }
+          }
+        }
+      }, 100); // Update every 100ms for smooth visuals
+    },
+    
+    // Initialize
+    initialize() {
+      console.log('Initializing popup');
+      
+      // First load settings
+      this.loadSettings();
+      
+      // Then sync with background state
+      chrome.runtime.sendMessage({ action: 'getTimerState' }, (response) => {
+        if (response && response.timerState) {
+          const timerState = response.timerState;
+          
+          console.log('Initializing popup with background state:', timerState);
+          
+          // Update local state from background
           this.minutes = timerState.minutes;
           this.seconds = timerState.seconds;
           this.isRunning = timerState.isRunning;
@@ -208,33 +522,20 @@ const app = createApp({
           this.remainingSeconds = timerState.remainingSeconds;
           this.completedPomodoros = timerState.completedPomodoros;
           
+          // Reset sync times
+          this.lastSyncTime = Date.now();
+          this.lastBackgroundSync = Date.now();
+          
           this.updateProgressRing();
           
-          // If timer is running, start local sync interval
-          if (this.isRunning) {
+          // If timer is running, start the sync interval
+          if (timerState.isRunning) {
             this.startSyncInterval();
           }
+        } else {
+          console.error('Failed to get timer state from background');
         }
       });
-    },
-    
-    // Start sync interval for UI updates
-    startSyncInterval() {
-      // Clear any existing interval
-      if (this.syncInterval) {
-        clearInterval(this.syncInterval);
-      }
-      
-      // Start new interval
-      this.syncInterval = setInterval(() => {
-        this.syncWithBackgroundState();
-      }, 1000);
-    },
-    
-    // Initialize
-    initialize() {
-      this.loadSettings();
-      this.syncWithBackgroundState();
     }
   },
   
@@ -248,6 +549,15 @@ const app = createApp({
     // Clear intervals
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
+      this.syncInterval = null;
+    }
+    
+    // Force a sync with the background to ensure timer state is saved
+    if (this.isRunning) {
+      console.log('Vue app unmounting, ensuring timer state is saved');
+      chrome.runtime.sendMessage({
+        action: 'getTimerState'
+      });
     }
   },
 
